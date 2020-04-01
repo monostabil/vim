@@ -345,7 +345,7 @@ call_by_name(char_u *name, int argcount, ectx_T *ectx, isn_T *iptr)
     static int
 call_partial(typval_T *tv, int argcount, ectx_T *ectx)
 {
-    char_u	*name;
+    char_u	*name = NULL;
     int		called_emsg_before = called_emsg;
 
     if (tv->v_type == VAR_PARTIAL)
@@ -356,9 +356,9 @@ call_partial(typval_T *tv, int argcount, ectx_T *ectx)
 	    return call_ufunc(pt->pt_func, argcount, ectx, NULL);
 	name = pt->pt_name;
     }
-    else
+    else if (tv->v_type == VAR_FUNC)
 	name = tv->vval.v_string;
-    if (call_by_name(name, argcount, ectx, NULL) == FAIL)
+    if (name == NULL || call_by_name(name, argcount, ectx, NULL) == FAIL)
     {
 	if (called_emsg == called_emsg_before)
 	    semsg(_(e_unknownfunc), name);
@@ -421,7 +421,6 @@ call_def_function(
     typval_T	*tv;
     int		idx;
     int		ret = FAIL;
-    dfunc_T	*dfunc;
     int		defcount = ufunc->uf_args.ga_len - argc;
 
 // Get pointer to item in the stack.
@@ -467,13 +466,17 @@ call_def_function(
 	++ectx.ec_stack.ga_len;
     }
 
-    // Reserve space for local variables.
-    dfunc = ((dfunc_T *)def_functions.ga_data) + ufunc->uf_dfunc_idx;
-    for (idx = 0; idx < dfunc->df_varcount; ++idx)
-	STACK_TV_VAR(idx)->v_type = VAR_UNKNOWN;
-    ectx.ec_stack.ga_len += dfunc->df_varcount;
+    {
+	// Reserve space for local variables.
+	dfunc_T	*dfunc = ((dfunc_T *)def_functions.ga_data)
+							 + ufunc->uf_dfunc_idx;
 
-    ectx.ec_instr = dfunc->df_instr;
+	for (idx = 0; idx < dfunc->df_varcount; ++idx)
+	    STACK_TV_VAR(idx)->v_type = VAR_UNKNOWN;
+	ectx.ec_stack.ga_len += dfunc->df_varcount;
+
+	ectx.ec_instr = dfunc->df_instr;
+    }
 
     // Decide where to start execution, handles optional arguments.
     init_instr_idx(ufunc, argc, &ectx);
@@ -1022,16 +1025,16 @@ call_def_function(
 			clear_tv(&partial);
 		    if (r == FAIL)
 			goto failed;
-
-		    if (pfunc->cpf_top)
-		    {
-			// Get the funcref from the stack, overwrite with the
-			// return value.
-			clear_tv(tv);
-			--ectx.ec_stack.ga_len;
-			*STACK_TV_BOT(-1) = *STACK_TV_BOT(0);
-		    }
 		}
+		break;
+
+	    case ISN_PCALL_END:
+		// PCALL finished, arguments have been consumed and replaced by
+		// the return value.  Now clear the funcref from the stack,
+		// and move the return value in its place.
+		--ectx.ec_stack.ga_len;
+		clear_tv(STACK_TV_BOT(-1));
+		*STACK_TV_BOT(-1) = *STACK_TV_BOT(0);
 		break;
 
 	    // call a user defined function or funcref/partial
@@ -1078,6 +1081,7 @@ call_def_function(
 	    case ISN_FUNCREF:
 		{
 		    partial_T   *pt = NULL;
+		    dfunc_T	*dfunc;
 
 		    pt = ALLOC_CLEAR_ONE(partial_T);
 		    if (pt == NULL)
@@ -1612,7 +1616,21 @@ call_def_function(
 
 	    case ISN_NEGATENR:
 		tv = STACK_TV_BOT(-1);
-		tv->vval.v_number = -tv->vval.v_number;
+		if (tv->v_type != VAR_NUMBER
+#ifdef FEAT_FLOAT
+			&& tv->v_type != VAR_FLOAT
+#endif
+			)
+		{
+		    emsg(_(e_number_exp));
+		    goto failed;
+		}
+#ifdef FEAT_FLOAT
+		if (tv->v_type == VAR_FLOAT)
+		    tv->vval.v_float = -tv->vval.v_float;
+		else
+#endif
+		    tv->vval.v_number = -tv->vval.v_number;
 		break;
 
 	    case ISN_CHECKNR:
@@ -1774,14 +1792,16 @@ ex_disassemble(exarg_T *eap)
 		}
 		break;
 	    case ISN_EXECUTE:
-		smsg("%4d EXECUTE %d", current, iptr->isn_arg.number);
+		smsg("%4d EXECUTE %lld", current,
+					    (long long)(iptr->isn_arg.number));
 		break;
 	    case ISN_LOAD:
 		if (iptr->isn_arg.number < 0)
 		    smsg("%4d LOAD arg[%lld]", current,
-				      iptr->isn_arg.number + STACK_FRAME_SIZE);
+			 (long long)(iptr->isn_arg.number + STACK_FRAME_SIZE));
 		else
-		    smsg("%4d LOAD $%lld", current, iptr->isn_arg.number);
+		    smsg("%4d LOAD $%lld", current,
+					    (long long)(iptr->isn_arg.number));
 		break;
 	    case ISN_LOADV:
 		smsg("%4d LOADV v:%s", current,
@@ -1817,15 +1837,16 @@ ex_disassemble(exarg_T *eap)
 		smsg("%4d LOADENV %s", current, iptr->isn_arg.string);
 		break;
 	    case ISN_LOADREG:
-		smsg("%4d LOADREG @%c", current, iptr->isn_arg.number);
+		smsg("%4d LOADREG @%c", current, (int)(iptr->isn_arg.number));
 		break;
 
 	    case ISN_STORE:
 		if (iptr->isn_arg.number < 0)
 		    smsg("%4d STORE arg[%lld]", current,
-				      iptr->isn_arg.number + STACK_FRAME_SIZE);
+			 (long long)(iptr->isn_arg.number + STACK_FRAME_SIZE));
 		else
-		    smsg("%4d STORE $%lld", current, iptr->isn_arg.number);
+		    smsg("%4d STORE $%lld", current,
+					    (long long)(iptr->isn_arg.number));
 		break;
 	    case ISN_STOREV:
 		smsg("%4d STOREV v:%s", current,
@@ -1862,7 +1883,7 @@ ex_disassemble(exarg_T *eap)
 		smsg("%4d STOREENV $%s", current, iptr->isn_arg.string);
 		break;
 	    case ISN_STOREREG:
-		smsg("%4d STOREREG @%c", current, iptr->isn_arg.number);
+		smsg("%4d STOREREG @%c", current, (int)iptr->isn_arg.number);
 		break;
 	    case ISN_STORENR:
 		smsg("%4d STORE %lld in $%d", current,
@@ -1872,7 +1893,8 @@ ex_disassemble(exarg_T *eap)
 
 	    // constants
 	    case ISN_PUSHNR:
-		smsg("%4d PUSHNR %lld", current, iptr->isn_arg.number);
+		smsg("%4d PUSHNR %lld", current,
+					    (long long)(iptr->isn_arg.number));
 		break;
 	    case ISN_PUSHBOOL:
 	    case ISN_PUSHSPEC:
@@ -1941,10 +1963,12 @@ ex_disassemble(exarg_T *eap)
 		smsg("%4d PUSH v:exception", current);
 		break;
 	    case ISN_NEWLIST:
-		smsg("%4d NEWLIST size %lld", current, iptr->isn_arg.number);
+		smsg("%4d NEWLIST size %lld", current,
+					    (long long)(iptr->isn_arg.number));
 		break;
 	    case ISN_NEWDICT:
-		smsg("%4d NEWDICT size %lld", current, iptr->isn_arg.number);
+		smsg("%4d NEWDICT size %lld", current,
+					    (long long)(iptr->isn_arg.number));
 		break;
 
 	    // function call
@@ -1984,6 +2008,9 @@ ex_disassemble(exarg_T *eap)
 		    smsg("%4d PCALL%s (argc %d)", current,
 			   cpfunc->cpf_top ? " top" : "", cpfunc->cpf_argcount);
 		}
+		break;
+	    case ISN_PCALL_END:
+		smsg("%4d PCALL end", current);
 		break;
 	    case ISN_RETURN:
 		smsg("%4d RETURN", current);
@@ -2153,8 +2180,8 @@ ex_disassemble(exarg_T *eap)
 			    else
 				smsg("%4d 2BOOL (!!val)", current);
 			    break;
-	    case ISN_2STRING: smsg("%4d 2STRING stack[%d]", current,
-							 iptr->isn_arg.number);
+	    case ISN_2STRING: smsg("%4d 2STRING stack[%lld]", current,
+					 (long long)(iptr->isn_arg.number));
 				break;
 
 	    case ISN_DROP: smsg("%4d DROP", current); break;

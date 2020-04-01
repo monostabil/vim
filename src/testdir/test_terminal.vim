@@ -298,13 +298,16 @@ func Test_terminal_scroll()
   let job = term_getjob(buf)
   call WaitForAssert({-> assert_equal("dead", job_status(job))})
   call term_wait(buf)
-  if has('win32')
-    " TODO: this should not be needed
-    sleep 100m
-  endif
 
-  let scrolled = buf->term_getscrolled()
-  call assert_equal(scrolled, term_getscrolled(buf))
+  " wait until the scrolling stops
+  while 1
+    let scrolled = buf->term_getscrolled()
+    sleep 20m
+    if scrolled == buf->term_getscrolled()
+      break
+    endif
+  endwhile
+
   call assert_equal('1', getline(1))
   call assert_equal('1', term_getline(buf, 1 - scrolled))
   call assert_equal('49', getline(49))
@@ -662,10 +665,14 @@ endfunction
 
 func Test_terminal_noblock()
   let buf = term_start(&shell)
+  let wait_time = 5000
+  let letters = 'abcdefghijklmnopqrstuvwxyz'
   if has('bsd') || has('mac') || has('sun')
     " The shell or something else has a problem dealing with more than 1000
-    " characters at the same time.
+    " characters at the same time.  It's very slow too.
     let len = 1000
+    let wait_time = 15000
+    let letters = 'abcdefghijklm'
   " NPFS is used in Windows, nonblocking mode does not work properly.
   elseif has('win32')
     let len = 1
@@ -673,7 +680,8 @@ func Test_terminal_noblock()
     let len = 5000
   endif
 
-  for c in ['a','b','c','d','e','f','g','h','i','j','k']
+  " Send a lot of text lines, should be buffered properly.
+  for c in split(letters, '\zs')
     call term_sendkeys(buf, 'echo ' . repeat(c, len) . "\<cr>")
   endfor
   call term_sendkeys(buf, "echo done\<cr>")
@@ -681,7 +689,7 @@ func Test_terminal_noblock()
   " On MS-Windows there is an extra empty line below "done".  Find "done" in
   " the last-but-one or the last-but-two line.
   let lnum = term_getsize(buf)[0] - 1
-  call WaitFor({-> term_getline(buf, lnum) =~ "done" || term_getline(buf, lnum - 1) =~ "done"}, 10000)
+  call WaitForAssert({-> assert_match('done', term_getline(buf, lnum - 1) .. '//' .. term_getline(buf, lnum))}, wait_time)
   let line = term_getline(buf, lnum)
   if line !~ 'done'
     let line = term_getline(buf, lnum - 1)
@@ -993,6 +1001,28 @@ func Test_terminal_term_start_empty_command()
   call assert_fails(cmd, 'E474')
   let cmd = "call term_start(0, {'curwin' : 1, 'term_finish' : 'close'})"
   call assert_fails(cmd, 'E474')
+  let cmd = "call term_start('', {'term_name' : []})"
+  call assert_fails(cmd, 'E475')
+  let cmd = "call term_start('', {'term_finish' : 'axby'})"
+  call assert_fails(cmd, 'E475')
+  let cmd = "call term_start('', {'eof_chars' : []})"
+  call assert_fails(cmd, 'E475:')
+  let cmd = "call term_start('', {'term_kill' : []})"
+  call assert_fails(cmd, 'E475:')
+  let cmd = "call term_start('', {'tty_type' : []})"
+  call assert_fails(cmd, 'E475:')
+  let cmd = "call term_start('', {'tty_type' : 'abc'})"
+  call assert_fails(cmd, 'E475:')
+  let cmd = "call term_start('', {'term_highlight' : []})"
+  call assert_fails(cmd, 'E475:')
+  if has('gui')
+    let cmd = "call term_start('', {'ansi_colors' : 'abc'})"
+    call assert_fails(cmd, 'E475:')
+    let cmd = "call term_start('', {'ansi_colors' : [[]]})"
+    call assert_fails(cmd, 'E730:')
+    let cmd = "call term_start('', {'ansi_colors' : repeat(['blue'], 18)})"
+    call assert_fails(cmd, 'E475:')
+  endif
 endfunc
 
 func Test_terminal_response_to_control_sequence()
@@ -1277,6 +1307,7 @@ func Test_terminal_dumpdiff_options()
   call assert_equal(1, winnr('$'))
   call term_dumpdiff('dumps/Test_popup_command_01.dump', 'dumps/Test_popup_command_02.dump', {'curwin': 1})
   call assert_equal(1, winnr('$'))
+  call assert_fails("call term_dumpdiff('dumps/Test_popup_command_01.dump', 'dumps/Test_popup_command_02.dump', {'bufnr': -1})", 'E475:')
   bwipe
 
   set laststatus&
@@ -1477,6 +1508,8 @@ func Test_terminal_api_call()
   call assert_equal(buf, g:called_bufnum2)
   call assert_equal(['hello', 123], g:called_arg2)
   call StopVimInTerminal(buf)
+
+  call assert_fails("call term_start('ls', {'term_api' : []})", 'E475:')
 
   unlet! g:called_bufnum2
   unlet! g:called_arg2
@@ -2426,7 +2459,6 @@ func Test_terminal_in_popup_min_size()
   let lines = [
 	\ 'set t_u7=',
 	\ 'call setline(1, range(20))',
-	\ 'hi PopTerm ctermbg=grey',
 	\ 'func OpenTerm()',
 	\ "  let s:buf = term_start('cat Xtext', #{hidden: 1})",
 	\ '  let g:winid = popup_create(s:buf, #{ border: []})',
@@ -2447,6 +2479,46 @@ func Test_terminal_in_popup_min_size()
   call StopVimInTerminal(buf)
   call delete('Xtext')
   call delete('XtermPopup')
+endfunc
+
+" Check a terminal in popup window with different colors
+func Terminal_in_popup_colored(group_name, highlight_cmd, highlight_opt)
+  CheckRunVimInTerminal
+  CheckUnix
+
+  let lines = [
+	\ 'set t_u7=',
+	\ 'call setline(1, range(20))',
+	\ 'func OpenTerm()',
+	\ "  let s:buf = term_start('cat', #{hidden: 1, "
+	\ .. a:highlight_opt .. "})",
+	\ '  let g:winid = popup_create(s:buf, #{ border: []})',
+	\ 'endfunc',
+	\ a:highlight_cmd,
+	\ ]
+  call writefile(lines, 'XtermPopup')
+  let buf = RunVimInTerminal('-S XtermPopup', #{rows: 15})
+  call term_wait(buf, 200)
+  call term_sendkeys(buf, ":set noruler\<CR>")
+  call term_sendkeys(buf, ":call OpenTerm()\<CR>")
+  call term_wait(buf, 100)
+  call term_sendkeys(buf, "hello\<CR>")
+  call VerifyScreenDump(buf, 'Test_terminal_popup_' .. a:group_name, {})
+
+  call term_sendkeys(buf, "\<C-D>")
+  call term_wait(buf, 100)
+  call term_sendkeys(buf, ":q\<CR>")
+  call term_wait(buf, 100)  " wait for terminal to vanish
+  call StopVimInTerminal(buf)
+  call delete('XtermPopup')
+endfunc
+
+func Test_terminal_in_popup_colored_Terminal()
+  call Terminal_in_popup_colored("Terminal", "highlight Terminal ctermfg=blue ctermbg=yellow", "")
+endfunc
+
+func Test_terminal_in_popup_colored_group()
+  call Terminal_in_popup_colored("MyTermCol", "highlight MyTermCol ctermfg=darkgreen ctermbg=lightblue", "term_highlight: 'MyTermCol',")
 endfunc
 
 func Test_double_popup_terminal()
@@ -2489,18 +2561,21 @@ func Test_term_nasty_callback()
     let g:buf1 = term_start('sh', #{hidden: 1, term_finish: 'close'})
     call popup_create(g:buf1, {})
     let g:buf2 = term_start(['sh', '-c'], #{curwin: 1, exit_cb: function('TermExit')})
-    sleep 100m
+    call term_wait(g:buf2, 100)
     call popup_close(win_getid())
   endfunc
   func TermExit(...)
-    call term_sendkeys(bufnr('#'), "exit\<CR>")
+    let altbuf = bufnr('#')
+    call term_sendkeys(altbuf, "exit\<CR>")
+    call term_wait(altbuf)
     call popup_close(win_getid())
-  endfu
+  endfunc
   call OpenTerms()
 
   call term_sendkeys(g:buf0, "exit\<CR>")
-  sleep 100m
+  call term_wait(g:buf0, 100)
   exe g:buf0 .. 'bwipe!'
   set hidden&
 endfunc
 
+" vim: shiftwidth=2 sts=2 expandtab

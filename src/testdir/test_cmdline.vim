@@ -68,6 +68,11 @@ func Test_complete_wildmenu()
   call assert_equal('"e Xtestfile3 Xtestfile4', @:)
   cd -
 
+  cnoremap <expr> <F2> wildmenumode()
+  call feedkeys(":cd Xdir\<Tab>\<F2>\<C-B>\"\<CR>", 'tx')
+  call assert_equal('"cd Xdir1/1', @:)
+  cunmap <F2>
+
   " cleanup
   %bwipe
   call delete('Xdir1/Xdir2/Xtestfile4')
@@ -1452,6 +1457,15 @@ func Test_cmdwin_blocked_commands()
   call assert_fails('call feedkeys("q:Q\<CR>", "xt")', 'E11:')
   call assert_fails('call feedkeys("q:Z\<CR>", "xt")', 'E11:')
   call assert_fails('call feedkeys("q:\<F1>\<CR>", "xt")', 'E11:')
+endfunc
+
+" Close the Cmd-line window in insert mode using CTRL-C
+func Test_cmdwin_insert_mode_close()
+  %bw!
+  let s = ''
+  exe "normal q:a\<C-C>let s='Hello'\<CR>"
+  call assert_equal('Hello', s)
+  call assert_equal(1, winnr('$'))
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

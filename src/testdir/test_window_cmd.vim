@@ -525,6 +525,7 @@ func Test_window_newtab()
   call assert_equal(2, tabpagenr('$'))
   call assert_equal(['Xb', 'Xa'], map(tabpagebuflist(1), 'bufname(v:val)'))
   call assert_equal(['Xc'      ], map(2->tabpagebuflist(), 'bufname(v:val)'))
+  call assert_equal(['Xc'      ], map(tabpagebuflist(), 'bufname(v:val)'))
 
   %bw!
 endfunc
@@ -1013,13 +1014,13 @@ func Run_noroom_for_newwindow_test(dir_arg)
   let dir = (a:dir_arg == 'v') ? 'vert ' : ''
 
   " Open as many windows as possible
-  for i in range(500)
+  while v:true
     try
       exe dir . 'new'
     catch /E36:/
       break
     endtry
-  endfor
+  endwhile
 
   call writefile(['first', 'second', 'third'], 'Xfile1')
   call writefile([], 'Xfile2')
